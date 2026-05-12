@@ -1,0 +1,1 @@
+﻿This is a test document. It contains simple text for analysis. The file upload should now work correctly with TXT, PDF, DOC, and DOCX files.

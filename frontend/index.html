@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Genie - Local AI Chatbot</title>
+    
+    <!-- KaTeX for math rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    
+    <link rel="stylesheet" href="/static/styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo" onclick="chatApp.toggleSidebar()" style="cursor: pointer;" title="Toggle Sidebar">
+                    <img src="/static/The_Genie_Aladdin.png" alt="Genie logo" class="logo-img">
+                    <span>Genie</span>
+                </div>
+                <button class="new-chat-btn" onclick="chatApp.newChat()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="5" x2="12" y2="19"/>
+                        <line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    New Chat
+                </button>
+            </div>
+
+            <div class="model-status" id="modelStatus">
+                <div class="status-indicator loading" id="statusIndicator"></div>
+                <span id="statusText">Loading model...</span>
+            </div>
+
+            <div class="sessions-list" id="sessionsList">
+                <div class="sessions-header">Recent Chats</div>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="settings-toggle" onclick="chatApp.toggleSettings()">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+                    </svg>
+                    Settings
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="chat-container">
+            <div class="chat-header">
+                <button class="sidebar-toggle" onclick="chatApp.toggleSidebar()" title="Show Sidebar">
+                    <img src="/static/The_Genie_Aladdin.png" alt="Genie logo" style="width: 24px; height: 24px;">
+                </button>
+                <h1 id="chatTitle">New Chat</h1>
+                <div class="header-actions">
+                    <button class="icon-btn" onclick="chatApp.clearCurrentChat()" title="Clear chat">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"/>
+                            <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="messages-area" id="messagesArea">
+                <div class="welcome-screen" id="welcomeScreen">
+                    <div class="welcome-content">
+                        <div class="welcome-icon">
+                            <img src="/static/The_Genie_Aladdin.png" alt="Genie logo" class="welcome-logo">
+                        </div>
+                        <h2>Welcome to Genie</h2>
+                        <p>A fully local AI chatbot running on your machine. No API keys. No cloud. 100% private.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <div class="input-wrapper" style="flex-direction: column; padding: 0;">
+                    <div id="filePreviewContainer" class="file-preview-container" style="display: none;">
+                        <img id="filePreviewImg" src="" alt="Preview">
+                        <div id="filePreviewName" class="file-name"></div>
+                        <button class="remove-file-btn" onclick="chatApp.removeFile()" title="Remove file">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="input-row">
+                        <label class="upload-btn" title="Upload images, documents">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"/>
+                                <line x1="5" y1="12" x2="19" y2="12"/>
+                            </svg>
+                            <input id="imageUpload" type="file" accept="image/*,.pdf,.txt,.doc,.docx">
+                        </label>
+                        <textarea 
+                            id="messageInput" 
+                            placeholder="Message Genie..." 
+                            rows="1"
+                            onkeydown="chatApp.handleKeyDown(event)"
+                            oninput="chatApp.autoResize(this)"
+                        ></textarea>
+                        <button class="send-btn" id="sendBtn" onclick="chatApp.sendMessage()" disabled>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="22" y1="2" x2="11" y2="13"/>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="input-footer">
+                    <span id="inputStatus">Genie can make mistakes. Consider checking important information.</span>
+                </div>
+            </div>
+        </main>
+
+        <!-- Settings Panel -->
+        <div class="settings-panel" id="settingsPanel">
+            <div class="settings-header">
+                <h3>Settings</h3>
+                <button class="close-btn" onclick="chatApp.toggleSettings()">×</button>
+            </div>
+            <div class="settings-content">
+                <div class="setting-group">
+                    <label>Temperature</label>
+                    <input type="range" id="temperature" min="0" max="2" step="0.1" value="1.0">
+                    <span class="value" id="tempValue">1.0</span>
+                </div>
+                <div class="setting-group">
+                    <label>Max Tokens</label>
+                    <input type="range" id="maxTokens" min="256" max="8192" step="256" value="8192">
+                    <span class="value" id="tokenValue">8192</span>
+                </div>
+                <div class="setting-group">
+                    <label>System Prompt</label>
+                    <textarea id="systemPrompt" rows="4">You are Genie, a helpful, harmless, and honest AI assistant.</textarea>
+                </div>
+                <div class="setting-group">
+                    <label>Context Window</label>
+                    <select id="contextWindow">
+                        <option value="4096">4K tokens</option>
+                        <option value="8192">8K tokens</option>
+                        <option value="16384">16K tokens</option>
+                        <option value="32768" selected>32K tokens</option>
+                    </select>
+                </div>
+                <button class="save-settings" onclick="chatApp.saveSettings()">Apply Settings</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=5"></script>
+</body>
+</html>
