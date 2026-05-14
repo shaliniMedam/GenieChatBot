@@ -17,7 +17,7 @@ class ChatApp {
         this.settings = {
             temperature: 1.0,
             maxTokens: 8192,
-            systemPrompt: 'You are Genie, a helpful and honest AI assistant.',
+            systemPrompt: 'Your name is Genie. You are a helpful AI. You must NEVER say your name is Gemma. You are NOT Gemma.',
             contextWindow: 32768,
         };
 
@@ -90,7 +90,13 @@ class ChatApp {
         try {
             const saved = localStorage.getItem('genie_settings');
             if (saved) {
-                this.settings = { ...this.settings, ...JSON.parse(saved) };
+                let parsed = JSON.parse(saved);
+                // Aggressively overwrite old cached prompts to force the name change
+                if (parsed.systemPrompt && (parsed.systemPrompt.includes('honest AI assistant') || parsed.systemPrompt.includes('helpful and honest'))) {
+                    parsed.systemPrompt = 'Your name is Genie. You are a helpful AI. You must NEVER say your name is Gemma. You are NOT Gemma.';
+                    localStorage.setItem('genie_settings', JSON.stringify(parsed));
+                }
+                this.settings = { ...this.settings, ...parsed };
             }
         } catch (e) {}
         this.applySettingsToUI();
@@ -333,7 +339,7 @@ class ChatApp {
                 this.currentSessionId = data.session_id;
                 try { localStorage.setItem('genie_session_id', this.currentSessionId); } catch (e) {}
             }
-
+            
             const message = data.response || 'File uploaded.';
             this.addMessage('assistant', message);
             this.loadSessions();
@@ -463,6 +469,8 @@ class ChatApp {
         html = html.replace(/```([^\n]*)\n?([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>');
         // Inline code
         html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+        // Images ![alt](url)
+        html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width: 100%; border-radius: 8px; margin: 8px 0;">');
         // Bold
         html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
         // Italic

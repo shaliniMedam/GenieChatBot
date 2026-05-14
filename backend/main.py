@@ -18,8 +18,10 @@ if sys.platform == "win32":
 import json
 import time
 import os
+import re
 from typing import Optional
 from pathlib import Path
+import uuid
 from contextlib import asynccontextmanager
 import zipfile
 import xml.etree.ElementTree as ET
@@ -136,6 +138,10 @@ if frontend_path.exists():
         from fastapi.responses import FileResponse
         return FileResponse(str(frontend_path / "index.html"))
 
+# ── Serve uploads ────────────────────────────────────────────────
+uploads_path = Path(__file__).parent / "uploads"
+uploads_path.mkdir(exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(uploads_path)), name="uploads")
 
 # ── Request models ───────────────────────────────────────────────
 class ChatRequest(BaseModel):
@@ -177,6 +183,7 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=503, detail=detail)
 
     session = _get_or_create_session(request.session_id, request.system_prompt)
+    extract_user_facts(session, request.message)
     session.add_message("user", request.message)
     history = session.get_history_for_model()
 
@@ -205,6 +212,7 @@ async def chat_stream(request: ChatRequest):
         return StreamingResponse(err(), media_type="text/event-stream")
 
     session = _get_or_create_session(request.session_id, request.system_prompt)
+    extract_user_facts(session, request.message)
     session.add_message("user", request.message)
     history = session.get_history_for_model()
 
@@ -230,6 +238,8 @@ async def chat_stream(request: ChatRequest):
 
         complete = "".join(full_response)
         if complete:
+            # Clean response to remove any Gemma mentions
+            complete = clean_response(complete)
             session.add_message("assistant", complete)
 
     return StreamingResponse(
@@ -333,45 +343,66 @@ async def analyze_file(
         print(f"[UPLOAD ERROR] Unsupported extension: {ext}")
         raise HTTPException(status_code=400, detail=f"Unsupported file type: '{ext}'. Supported: {DOCUMENT_EXTS + IMAGE_EXTS}")
 
+    # Save file to disk for persistence
+    safe_filename = f"{uuid.uuid4().hex}_{file.filename}"
+    file_path = uploads_path / safe_filename
+    with open(file_path, "wb") as f:
+        f.write(content)
+    persistent_url = f"/uploads/{safe_filename}"
+    print(f"[UPLOAD] Saved to {file_path}")
+
     # Create/get session
     session = _get_or_create_session(session_id, None)
     print(f"[UPLOAD] Session: {session.session_id}")
 
     try:
-        if is_document:
-            print(f"[UPLOAD] Extracting document text...")
-            text = extract_document_text(file.filename, content)
-            print(f"[UPLOAD] Extracted: {len(text)} chars")
+        from backend.chat_engine import process_upload, build_prompt
+        
+        file_text, is_image, needs_vision = process_upload(content, file.filename)
+        
+        if needs_vision:
+            print("[UPLOAD] Routing image to Moondream2 vision model...")
+            from backend.vision_processor import describe_image
+            user_message = prompt or "What is in this image?"
+            vision_answer = describe_image(content, user_message)
             
-            if text.startswith('[') and text.endswith(']'):
-                print(f"[UPLOAD WARNING] Extraction issue: {text}")
+            response_text = sanitize_for_console(vision_answer)
             
-            # Build prompt
-            prompt_text = f"The user uploaded a document named '{file.filename}'.\n\nHere is the extracted content:\n{text}\n\n"
-            if prompt:
-                prompt_text += f"User's question: {prompt}\n\nPlease answer based on the document content."
-            else:
-                prompt_text += "Please analyze this document and provide a summary."
+            display_content = f"![{file.filename}]({persistent_url})\n\n{user_message}"
+            session.add_message("user", sanitize_for_console(user_message), metadata={"display_content": display_content})
+            session.add_message("assistant", response_text)
+            print(f"{'='*50}\n")
+            
+            return {
+                "response": response_text,
+                "analysis": {"format": ext, "type": "vision", "analysis": "Processed by Moondream2"},
+                "session_id": session.session_id,
+                "ocr_preview": None
+            }
+        else:
+            # Optional: truncate very long OCR output for 2B model context window
+            if len(file_text) > 4000:  # safer limit after prompt wrapping overhead
+                file_text = file_text[:4000] + "\n...[truncated]"
                 
+            user_message = prompt or "Please analyze this file."
+            prompt_text = build_prompt(file_text, user_message, is_image)
             analysis_data = {
                 "format": ext,
-                "type": "document",
-                "analysis": f"Extracted {len(text)} characters"
+                "type": "processed",
+                "analysis": f"Extracted {len(file_text)} characters"
             }
-            
-        else:  # Image
-            print(f"[UPLOAD] Analyzing image...")
-            analysis_data = analyze_image_bytes(content)
-            prompt_text = build_image_prompt(file, analysis_data)
-            if prompt:
-                prompt_text += f"\nUser's question: {prompt}"
 
-        # Sanitize and send to model
-        prompt_text = sanitize_for_console(prompt_text)
-        print(f"[UPLOAD] Prompt length: {len(prompt_text)} chars")
+            # Sanitize and send to model
+            prompt_text = sanitize_for_console(prompt_text)
+            print(f"[UPLOAD] Prompt length: {len(prompt_text)} chars")
 
-        session.add_message("user", prompt_text)
-        history = session.get_history_for_model()
+            if is_image:
+                display_content = f"![{file.filename}]({persistent_url})\n\n{user_message}"
+            else:
+                display_content = f"📄 **{file.filename}**\n\n{user_message}" if user_message != "Please analyze this file." else f"📄 **{file.filename}**"
+                
+            session.add_message("user", prompt_text, metadata={"display_content": display_content})
+            history = session.get_history_for_model()
 
         if not model_manager.model_loaded:
             raise HTTPException(status_code=503, detail="Model not loaded yet")
@@ -397,6 +428,7 @@ async def analyze_file(
             "response": response_text,
             "analysis": analysis_data,
             "session_id": session.session_id,
+            "ocr_preview": file_text[:500] if file_text else None
         }
         
     except HTTPException:
@@ -420,11 +452,53 @@ def _get_or_create_session(session_id, system_prompt) -> ChatSession:
         session = chat_engine.get_session(session_id)
         if session:
             if system_prompt and system_prompt != session.system_prompt:
-                session.system_prompt = system_prompt
-                if session.messages and session.messages[0].role == "system":
-                    session.messages[0].content = system_prompt
+                session.base_system_prompt = system_prompt
+                session._refresh_system_prompt()
             return session
     return chat_engine.create_session(session_id, system_prompt)
+
+
+def extract_user_facts(session: ChatSession, message: str):
+    """Detect and store user facts from their message."""
+    name_match = re.search(
+        r"(?:my name is|i am|i'm|call me)\s+([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+)?)",
+        message,
+        re.IGNORECASE,
+    )
+    if name_match:
+        name = name_match.group(1).strip()
+        session.update_user_fact("User's name", name)
+        print(f"[MEMORY] Stored user name: {name}")
+
+
+def clean_response(response_text: str) -> str:
+    """
+    Post-process response to remove any Gemma/Google model references.
+    This handles cases where the model tries to override its identity.
+    This is a final safety net after token-level cleaning.
+    """
+    # Replace model names
+    response_text = re.sub(r'\bGemma\s*\d*\.?\d*\b', 'Genie', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r'\bgemini\b', 'Genie', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r'\bGoogle\b', 'Genie', response_text, flags=re.IGNORECASE)
+    
+    # Remove Google training references
+    response_text = re.sub(r',?\s*trained by[^.]*?\.', '.', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r',?\s*developed by[^.]*?\.', '.', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r',?\s*created by[^.]*?\.', '.', response_text, flags=re.IGNORECASE)
+    
+    # Replace or remove "don't have a name" phrases
+    response_text = re.sub(r"[,\s]+I\s+don't\s+have\s+a\s+(personal\s+)?name", '', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r"[,\s]+I\s+don't\s+have\s+a\s+name", '', response_text, flags=re.IGNORECASE)
+    
+    # Replace LLM identity statements
+    response_text = re.sub(r'I\s+am\s+a\s+large\s+language\s+model', 'I am Genie', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r'I\s+am\s+(an?\s+)?language\s+model', 'I am Genie', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r'I\s+am\s+(an?\s+)?(AI|artificial intelligence)\s+model', 'I am Genie', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r"I\'m\s+a\s+(?:large\s+)?language\s+model", "I'm Genie", response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r'as\s+a\s+(?:large\s+)?language\s+model', 'as Genie', response_text, flags=re.IGNORECASE)
+    
+    return response_text
 
 
 def analyze_image_bytes(data: bytes) -> dict:

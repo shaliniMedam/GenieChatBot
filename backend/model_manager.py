@@ -154,13 +154,16 @@ class ModelManager:
                 max_tokens=max_tok,
                 stop=self.settings["stop"],
                 stream=True,
+                chat_format="gemma",
             )
             for chunk in stream:
                 if chunk.get("choices"):
                     delta = chunk["choices"][0].get("delta", {})
                     content = delta.get("content", "")
                     if content:
-                        yield self._sse("token", content)
+                        # Clean Gemma mentions in real-time
+                        cleaned = self._clean_token(content)
+                        yield self._sse("token", cleaned)
             yield self._sse("done", "")
         except Exception as e:
             yield self._sse("error", f"Inference error: {str(e)}")
@@ -187,6 +190,7 @@ class ModelManager:
                 max_tokens=max_tok,
                 stop=self.settings["stop"],
                 stream=False,
+                chat_format="gemma",
             )
             return {
                 "response": response["choices"][0]["message"]["content"],
@@ -200,6 +204,24 @@ class ModelManager:
     @staticmethod
     def _sse(event: str, data: str) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    @staticmethod
+    def _clean_token(token: str) -> str:
+        """
+        Clean a single token to remove Gemma/Google model references.
+        This is called on each streamed token for real-time filtering.
+        """
+        import re
+        
+        # Replace problematic keywords
+        token = re.sub(r'\bGemma\b', 'Genie', token, flags=re.IGNORECASE)
+        token = re.sub(r'\bgemini\b', 'Genie', token, flags=re.IGNORECASE)
+        token = re.sub(r'\bGoogle\b', 'Genie', token, flags=re.IGNORECASE)
+        token = re.sub(r'\blanguage model\b', 'assistant', token, flags=re.IGNORECASE)
+        token = re.sub(r"\bdon't have a\s+name\b", "am Genie", token, flags=re.IGNORECASE)
+        token = re.sub(r"\bdon't have\s+a\s+personal\s+name\b", "am Genie", token, flags=re.IGNORECASE)
+        
+        return token
 
 
 model_manager = ModelManager()

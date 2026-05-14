@@ -50,3 +50,4 @@ env/
 Thumbs.db
 
 models/
+backend/uploads/

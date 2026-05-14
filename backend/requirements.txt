@@ -6,3 +6,10 @@ python-multipart==0.0.17
 PyPDF2==3.0.1
 python-docx==1.1.2
 olefile==0.47
+pytesseract
+Pillow
+pdf2image
+transformers
+torch
+accelerate
+qwen-vl-utils
