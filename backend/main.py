@@ -461,7 +461,7 @@ async def analyze_image(file: UploadFile = File(...), session_id: Optional[str] 
 
 # ── Helper functions ───────────────────────────────────────────
 def _trigger_compression_async(session: ChatSession):
-    """Trigger history compression in background thread after response."""
+    """Trigger history compression and chat context extraction in background thread."""
     def compress_task():
         try:
             from backend.model_manager import model_manager
@@ -469,11 +469,87 @@ def _trigger_compression_async(session: ChatSession):
                 did_compress = session.check_and_compress(model_manager)
                 if did_compress:
                     print(f"[COMPRESSION] Session {session.session_id}: compressed successfully")
+
+                # Also extract and store chat context from this session
+                _extract_chat_context_async(session, model_manager)
         except Exception as e:
             print(f"[COMPRESSION BG ERROR] {e}")
-    
+
     thread = threading.Thread(target=compress_task, daemon=True)
     thread.start()
+
+
+def _extract_chat_context_async(session: ChatSession, model_manager):
+    """Extract key discussion topics and store them for future reference."""
+    try:
+        if len(session.messages) < 4:
+            return  # Need enough messages to extract from
+
+        # Build a simple prompt to extract topics
+        recent_msgs = [m for m in session.messages if m.role in ["user", "assistant"]][-6:]
+
+        transcript = []
+        for msg in recent_msgs:
+            prefix = "User" if msg.role == "user" else "Genie"
+            content = msg.content[:250] if len(msg.content) > 250 else msg.content
+            # Clean up content for readability
+            content = content.replace("\n", " ")[:250]
+            transcript.append(f"{prefix}: {content}")
+
+        if not transcript:
+            return
+
+        summary_prompt = [
+            {
+                "role": "user",
+                "content": f"""Extract 1-2 key discussion topics from this conversation (just the topics, not pleasantries).
+Be very brief. Example: "User asked about Paris attractions and transportation"
+
+Conversation:
+{chr(10).join(transcript)}
+
+Topics (1-2 sentences max):"""
+            }
+        ]
+
+        result = model_manager.generate_sync(
+            messages=summary_prompt,
+            temperature=0.2,
+            max_tokens=100,
+        )
+
+        if "response" in result and "error" not in result:
+            topics_text = result["response"].strip()
+            if topics_text and len(topics_text) > 10:
+                # Store in user_facts.json
+                import json
+                from pathlib import Path
+
+                facts_file = Path(__file__).parent / "user_facts.json"
+                all_facts = {}
+                if facts_file.exists():
+                    try:
+                        all_facts = json.loads(facts_file.read_text())
+                    except:
+                        pass
+
+                chat_context = all_facts.get("chat_context", [])
+
+                # Parse topics (might be comma or newline separated)
+                topics = [t.strip().lstrip("- ").strip() for t in topics_text.split("\n") if t.strip()]
+
+                for topic in topics:
+                    if topic and 15 < len(topic) < 300 and topic not in chat_context:
+                        chat_context.append(topic)
+
+                # Keep only last 8 topics to avoid bloating context
+                chat_context = chat_context[-8:]
+                all_facts["chat_context"] = chat_context
+
+                facts_file.write_text(json.dumps(all_facts, indent=2))
+                print(f"[CONTEXT] Stored {len(topics)} topics for future reference")
+    except Exception as e:
+        print(f"[CONTEXT ERROR] {e}")
 
 
 def _get_or_create_session(session_id, system_prompt) -> ChatSession:
@@ -507,30 +583,37 @@ def clean_response(response_text: str) -> str:
     This handles cases where the model tries to override its identity.
     This is a final safety net after token-level cleaning.
     """
+    # Remove control tokens and tags that leak through
+    response_text = re.sub(r'<[^>]+>', '', response_text)
+    response_text = re.sub(r'\[end_of_turn\]', '', response_text, flags=re.IGNORECASE)
+    response_text = re.sub(r'\[end_of_sequence\]', '', response_text, flags=re.IGNORECASE)
+
     # Replace model names
     response_text = re.sub(r'\bGemma\s*\d*\.?\d*\b', 'Genie', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r'\bgemini\b', 'Genie', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r'\bGoogle\b', 'Genie', response_text, flags=re.IGNORECASE)
-    
+
     # Remove Google training references
     response_text = re.sub(r',?\s*trained by[^.]*?\.', '.', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r',?\s*developed by[^.]*?\.', '.', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r',?\s*created by[^.]*?\.', '.', response_text, flags=re.IGNORECASE)
-    
+
     # Replace or remove "don't have a name" phrases
     response_text = re.sub(r"[,\s]+I\s+don't\s+have\s+a\s+(personal\s+)?name", '', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r"[,\s]+I\s+don't\s+have\s+a\s+name", '', response_text, flags=re.IGNORECASE)
-    
+
     # Replace LLM identity statements
     response_text = re.sub(r'I\s+am\s+a\s+large\s+language\s+model', 'I am Genie', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r'I\s+am\s+(an?\s+)?language\s+model', 'I am Genie', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r'I\s+am\s+(an?\s+)?(AI|artificial intelligence)\s+model', 'I am Genie', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r"I\'m\s+a\s+(?:large\s+)?language\s+model", "I'm Genie", response_text, flags=re.IGNORECASE)
     response_text = re.sub(r'as\s+a\s+(?:large\s+)?language\s+model', 'as Genie', response_text, flags=re.IGNORECASE)
-    
-    # Remove hallucinated control tokens like <end_of_turn> or <channel|>
-    response_text = re.sub(r'<[^>]+(?:_turn|\|)>', '', response_text, flags=re.IGNORECASE)
-    
+
+    # Clean up excessive whitespace and isolated words
+    response_text = re.sub(r'\n{3,}', '\n\n', response_text)
+    response_text = re.sub(r'^\s*Genie\s*$', '', response_text, flags=re.MULTILINE)
+    response_text = response_text.strip()
+
     return response_text
 
 

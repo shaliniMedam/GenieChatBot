@@ -120,15 +120,20 @@ class ChatSession:
         self._refresh_system_prompt()
 
     def _refresh_system_prompt(self):
-        if not self.user_facts:
-            self.system_prompt = self.base_system_prompt
-        else:
+        prompt_parts = [self.base_system_prompt]
+
+        # Add known user facts
+        if self.user_facts:
             facts_text = "\n".join([f"- {k}: {v}" for k, v in self.user_facts.items()])
-            self.system_prompt = (
-                self.base_system_prompt
-                + "\n\nKNOWN USER FACTS (always remember these):\n"
-                + facts_text
-            )
+            prompt_parts.append(f"KNOWN USER FACTS (always remember these):\n{facts_text}")
+
+        # Add chat context from previous discussions
+        chat_context = self._get_chat_context_text()
+        if chat_context:
+            prompt_parts.append(chat_context)
+
+        self.system_prompt = "\n\n".join(prompt_parts)
+
         if self.messages and self.messages[0].role == "system":
             self.messages[0].content = self.system_prompt
 
@@ -139,7 +144,7 @@ class ChatSession:
                 all_facts = json.loads(FACTS_FILE.read_text())
             except Exception:
                 all_facts = {}
-        
+
         global_facts = all_facts.get("global", {})
         global_facts.update(self.user_facts)
         all_facts["global"] = global_facts
@@ -153,6 +158,18 @@ class ChatSession:
                 self._refresh_system_prompt()
             except Exception:
                 pass
+
+    def _get_chat_context_text(self) -> str:
+        """Get stored chat context from previous discussions."""
+        if FACTS_FILE.exists():
+            try:
+                all_facts = json.loads(FACTS_FILE.read_text())
+                chat_context = all_facts.get("chat_context", [])
+                if chat_context:
+                    return "PREVIOUS DISCUSSION TOPICS:\n" + "\n".join(f"- {t}" for t in chat_context)
+            except Exception:
+                pass
+        return ""
 
     # ── FULL Summarization Methods ──────────────────────────────
 

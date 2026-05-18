@@ -217,7 +217,12 @@ class ModelManager:
         This is called on each streamed token for real-time filtering.
         """
         import re
-        
+
+        # Remove control tokens immediately
+        token = re.sub(r'<[^>]+>', '', token)
+        token = re.sub(r'\[end_of_turn\]', '', token, flags=re.IGNORECASE)
+        token = re.sub(r'\[end_of_sequence\]', '', token, flags=re.IGNORECASE)
+
         # Replace problematic keywords
         token = re.sub(r'\bGemma\b', 'Genie', token, flags=re.IGNORECASE)
         token = re.sub(r'\bgemini\b', 'Genie', token, flags=re.IGNORECASE)
@@ -225,7 +230,7 @@ class ModelManager:
         token = re.sub(r'\blanguage model\b', 'assistant', token, flags=re.IGNORECASE)
         token = re.sub(r"\bdon't have a\s+name\b", "am Genie", token, flags=re.IGNORECASE)
         token = re.sub(r"\bdon't have\s+a\s+personal\s+name\b", "am Genie", token, flags=re.IGNORECASE)
-        
+
         return token
 
 
