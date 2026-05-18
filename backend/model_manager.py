@@ -36,7 +36,7 @@ DEFAULT_SETTINGS = {
     "top_k": 64,
     "repeat_penalty": 1.0,
     "max_tokens": 8192,   # ← 8K output for complete responses
-    "stop": ["<turn|>", "user:", "User:"],
+    "stop": ["<turn|>", "user:", "User:", "<end_of_turn>", "<eos>"],
 }
 
 # ---------------------------------------------------------------------------
@@ -105,6 +105,7 @@ class ModelManager:
                     n_gpu_layers=0,
                     use_mmap=True,
                     use_mlock=False,
+                    chat_format="gemma",
                 )
                 self.model_loaded = True
                 self.load_error = None
@@ -144,27 +145,31 @@ class ModelManager:
         temp = temperature if temperature is not None else self.settings["temperature"]
         max_tok = max_tokens if max_tokens is not None else self.settings["max_tokens"]
 
+        # If model is currently locked (e.g. background summarization), yield a message
+        if self._lock.locked():
+            yield self._sse("token", "\n*(Genie is organizing memories, this may take a moment...)*\n\n")
+
         try:
-            stream = self._llm.create_chat_completion(
-                messages=messages,
-                temperature=temp,
-                top_p=self.settings["top_p"],
-                top_k=self.settings["top_k"],
-                repeat_penalty=self.settings["repeat_penalty"],
-                max_tokens=max_tok,
-                stop=self.settings["stop"],
-                stream=True,
-                chat_format="gemma",
-            )
-            for chunk in stream:
-                if chunk.get("choices"):
-                    delta = chunk["choices"][0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        # Clean Gemma mentions in real-time
-                        cleaned = self._clean_token(content)
-                        yield self._sse("token", cleaned)
-            yield self._sse("done", "")
+            with self._lock:
+                stream = self._llm.create_chat_completion(
+                    messages=messages,
+                    temperature=temp,
+                    top_p=self.settings["top_p"],
+                    top_k=self.settings["top_k"],
+                    repeat_penalty=self.settings["repeat_penalty"],
+                    max_tokens=max_tok,
+                    stop=self.settings["stop"],
+                    stream=True,
+                )
+                for chunk in stream:
+                    if chunk.get("choices"):
+                        delta = chunk["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            # Clean Gemma mentions in real-time
+                            cleaned = self._clean_token(content)
+                            yield self._sse("token", cleaned)
+                yield self._sse("done", "")
         except Exception as e:
             yield self._sse("error", f"Inference error: {str(e)}")
 
@@ -181,21 +186,21 @@ class ModelManager:
         max_tok = max_tokens if max_tokens is not None else self.settings["max_tokens"]
 
         try:
-            response = self._llm.create_chat_completion(
-                messages=messages,
-                temperature=temp,
-                top_p=self.settings["top_p"],
-                top_k=self.settings["top_k"],
-                repeat_penalty=self.settings["repeat_penalty"],
-                max_tokens=max_tok,
-                stop=self.settings["stop"],
-                stream=False,
-                chat_format="gemma",
-            )
-            return {
-                "response": response["choices"][0]["message"]["content"],
-                "usage": response.get("usage", {}),
-            }
+            with self._lock:
+                response = self._llm.create_chat_completion(
+                    messages=messages,
+                    temperature=temp,
+                    top_p=self.settings["top_p"],
+                    top_k=self.settings["top_k"],
+                    repeat_penalty=self.settings["repeat_penalty"],
+                    max_tokens=max_tok,
+                    stop=self.settings["stop"],
+                    stream=False,
+                )
+                return {
+                    "response": response["choices"][0]["message"]["content"],
+                    "usage": response.get("usage", {}),
+                }
         except Exception as e:
             return {"error": str(e)}
 

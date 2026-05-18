@@ -19,6 +19,7 @@ import json
 import time
 import os
 import re
+import threading
 from typing import Optional
 from pathlib import Path
 import uuid
@@ -196,10 +197,15 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=result["error"])
 
     session.add_message("assistant", result["response"])
+
+    # ── TRIGGER BACKGROUND COMPRESSION (ALL PAST MESSAGES) ───
+    _trigger_compression_async(session)
+
     return {
         "response": result["response"],
         "session_id": session.session_id,
         "usage": result.get("usage", {}),
+        "should_suggest_new_chat": session.should_suggest_new_chat(),
     }
 
 
@@ -241,6 +247,13 @@ async def chat_stream(request: ChatRequest):
             # Clean response to remove any Gemma mentions
             complete = clean_response(complete)
             session.add_message("assistant", complete)
+
+            # ── TRIGGER BACKGROUND COMPRESSION (ALL PAST) ──────
+            _trigger_compression_async(session)
+
+            # ── SUGGEST NEW CHAT IF NEEDED ──────────────────────
+            if session.should_suggest_new_chat():
+                yield f"event: suggest_new_chat\ndata: {json.dumps(True)}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -447,13 +460,30 @@ async def analyze_image(file: UploadFile = File(...), session_id: Optional[str] 
 
 
 # ── Helper functions ───────────────────────────────────────────
+def _trigger_compression_async(session: ChatSession):
+    """Trigger history compression in background thread after response."""
+    def compress_task():
+        try:
+            from backend.model_manager import model_manager
+            if model_manager.model_loaded and not model_manager.loading:
+                did_compress = session.check_and_compress(model_manager)
+                if did_compress:
+                    print(f"[COMPRESSION] Session {session.session_id}: compressed successfully")
+        except Exception as e:
+            print(f"[COMPRESSION BG ERROR] {e}")
+    
+    thread = threading.Thread(target=compress_task, daemon=True)
+    thread.start()
+
+
 def _get_or_create_session(session_id, system_prompt) -> ChatSession:
     if session_id:
         session = chat_engine.get_session(session_id)
         if session:
-            if system_prompt and system_prompt != session.system_prompt:
-                session.base_system_prompt = system_prompt
-                session._refresh_system_prompt()
+            # Check if the frontend's raw system prompt changed
+            # (We check against the frontend's string if possible, or just force update)
+            if system_prompt:
+                session.set_system_prompt(system_prompt)
             return session
     return chat_engine.create_session(session_id, system_prompt)
 
@@ -497,6 +527,9 @@ def clean_response(response_text: str) -> str:
     response_text = re.sub(r'I\s+am\s+(an?\s+)?(AI|artificial intelligence)\s+model', 'I am Genie', response_text, flags=re.IGNORECASE)
     response_text = re.sub(r"I\'m\s+a\s+(?:large\s+)?language\s+model", "I'm Genie", response_text, flags=re.IGNORECASE)
     response_text = re.sub(r'as\s+a\s+(?:large\s+)?language\s+model', 'as Genie', response_text, flags=re.IGNORECASE)
+    
+    # Remove hallucinated control tokens like <end_of_turn> or <channel|>
+    response_text = re.sub(r'<[^>]+(?:_turn|\|)>', '', response_text, flags=re.IGNORECASE)
     
     return response_text
 

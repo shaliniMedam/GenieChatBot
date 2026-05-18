@@ -406,7 +406,9 @@ class ChatApp {
                     document.getElementById('messagesArea').appendChild(messageDiv);
                 }
                 fullContent += data;
-                contentDiv.innerHTML = this.formatMarkdown(fullContent);
+                // Strip out leaked Gemma control tokens from the display
+                const displayContent = fullContent.replace(/<[^>]+(?:_turn|\|)>/gi, '');
+                contentDiv.innerHTML = this.formatMarkdown(displayContent);
                 // Render KaTeX math after each update
                 this.renderMath(contentDiv);
                 const area = document.getElementById('messagesArea');
@@ -419,6 +421,11 @@ class ChatApp {
                 if (!this.currentSessionId) {
                     this.currentSessionId = data;
                     try { localStorage.setItem('genie_session_id', data); } catch (e) {}
+                }
+
+            } else if (event === 'suggest_new_chat') {
+                if (data === true) {
+                    this.showBanner('💡 This conversation is getting long. Starting a new chat may improve response quality.', 'info');
                 }
             }
         };
