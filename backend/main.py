@@ -56,7 +56,7 @@ except ImportError:
     olefile = None
 
 from backend.model_manager import model_manager
-from backend.chat_engine import chat_engine, ChatSession, FACTS_FILE
+from backend.chat_engine import chat_engine, ChatEngine, ChatSession, FACTS_FILE
 
 
 def sanitize_for_console(text: str) -> str:
@@ -191,12 +191,14 @@ async def chat(request: ChatRequest):
     result = model_manager.generate_sync(
         messages=history,
         temperature=1.0,
-        max_tokens=8192,
+        max_tokens=2048,
     )
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
 
     session.add_message("assistant", result["response"])
+    extract_user_facts(session, result["response"], is_assistant=True)  # catch "Hello Shalini!"
+    chat_engine.save_session(session)   # ← persist to disk
 
     # ── TRIGGER BACKGROUND COMPRESSION (ALL PAST MESSAGES) ───
     _trigger_compression_async(session)
@@ -247,6 +249,8 @@ async def chat_stream(request: ChatRequest):
             # Clean response to remove any Gemma mentions
             complete = clean_response(complete)
             session.add_message("assistant", complete)
+            extract_user_facts(session, complete, is_assistant=True)  # catch "Hello Shalini!"
+            chat_engine.save_session(session)   # ← persist to disk
 
             # ── TRIGGER BACKGROUND COMPRESSION (ALL PAST) ──────
             _trigger_compression_async(session)
@@ -384,6 +388,7 @@ async def analyze_file(
             display_content = f"![{file.filename}]({persistent_url})\n\n{user_message}"
             session.add_message("user", sanitize_for_console(user_message), metadata={"display_content": display_content})
             session.add_message("assistant", response_text)
+            chat_engine.save_session(session)   # ← persist to disk
             print(f"{'='*50}\n")
             
             return {
@@ -435,6 +440,7 @@ async def analyze_file(
         print(f"[UPLOAD] Response: {len(response_text)} chars")
         
         session.add_message("assistant", response_text)
+        chat_engine.save_session(session)   # ← persist to disk
         print(f"{'='*50}\n")
 
         return {
@@ -497,19 +503,21 @@ def _extract_chat_context_async(session: ChatSession, model_manager):
 
         chat_context = all_facts.get("chat_context", [])
 
-        # Take the first user message as the discussion topic (what they initially asked about)
-        first_msg = user_msgs[0].strip()
+        first_msg = user_msgs[0]
+        # Clean up common phrases to make it read more like a "topic" rather than a raw question
+        topic = re.sub(r'^(what is|what are|how to|write a|can you|explain|tell me about|i am interested in|i want to know)\s+', '', first_msg, flags=re.IGNORECASE).strip()
+        topic = topic.strip('?.,!')
 
         # Shorten to max 120 chars for storage
-        if len(first_msg) > 120:
-            first_msg = first_msg[:117] + "..."
+        if len(topic) > 120:
+            topic = topic[:117] + "..."
 
         # Only add if it's not a greeting and doesn't already exist
-        if (len(first_msg) > 8 and
-            first_msg.lower() not in [c.lower() for c in chat_context] and
-            not any(x in first_msg.lower() for x in ["hello", "hi ", "hey ", "what can you do"])):
+        if (len(topic) > 3 and
+            topic.lower() not in [c.lower() for c in chat_context] and
+            not any(x in topic.lower() for x in ["hello", "hi ", "hey ", "what can you do"])):
 
-            chat_context.append(first_msg)
+            chat_context.append(topic)
 
             # Keep only last 10 topics to avoid bloating context
             chat_context = chat_context[-10:]
@@ -525,25 +533,94 @@ def _get_or_create_session(session_id, system_prompt) -> ChatSession:
     if session_id:
         session = chat_engine.get_session(session_id)
         if session:
-            # Check if the frontend's raw system prompt changed
-            # (We check against the frontend's string if possible, or just force update)
             if system_prompt:
                 session.set_system_prompt(system_prompt)
+            session.load_facts()  # Sync latest global facts across sessions
             return session
-    return chat_engine.create_session(session_id, system_prompt)
+    # New session — load any previously saved global facts immediately
+    session = chat_engine.create_session(session_id, system_prompt)
+    session.load_facts()          # inject name/hobbies/etc from user_facts.json
+    session._refresh_system_prompt()
+    return session
 
 
-def extract_user_facts(session: ChatSession, message: str):
-    """Detect and store user facts from their message."""
-    name_match = re.search(
-        r"(?:my name is|i am|i'm|call me)\s+([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+)?)",
-        message,
-        re.IGNORECASE,
-    )
+# ── Patterns used by extract_user_facts ──────────────────────────
+_NAME_PATTERNS = [
+    # User says their name directly
+    r"(?:my name is|i am|i'm|call me|it's|its)\s+([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+)?)",
+    # User types just their name as a standalone word (1-2 capitalized words, ≤20 chars)
+    r"^([A-Z][a-z]{1,14}(?:\s+[A-Z][a-z]{1,14})?)$",
+]
+_SKIP_NAMES = {
+    "fine", "good", "ok", "okay", "not", "sorry", "just", "going",
+    "interested", "trying", "a", "the", "happy", "sad", "tired",
+    "hello", "hey", "hi", "yes", "no", "sure", "thanks", "please",
+    "genie", "gemma", "google", "what", "when", "where", "who", "how",
+}
+
+_GREETING_NAME_RE = re.compile(
+    r"(?:Hello|Hi|Hey),?\s+([A-Z][a-z]{1,20})(?:[!,.]|$)", re.MULTILINE
+)
+
+
+def extract_user_facts(session: ChatSession, message: str, is_assistant: bool = False):
+    """
+    Detect and store user facts.
+    - Called with is_assistant=False for user messages.
+    - Called with is_assistant=True for assistant replies (to catch greeting patterns
+      like 'Hello Shalini!' which confirm the name the user gave).
+    """
+    if is_assistant:
+        # Extract name from assistant greeting: "Hello Shalini!" / "Hi Shalini,"
+        m = _GREETING_NAME_RE.search(message)
+        if m:
+            name = m.group(1).strip()
+            if name.lower() not in _SKIP_NAMES:
+                existing = session.user_facts.get("User's name", "")
+                if not existing:          # only store if we don't already have it
+                    session.update_user_fact("User's name", name)
+                    print(f"[MEMORY] Stored name from greeting: {name}")
+        return  # nothing else to extract from assistant messages
+
+    # ── User message fact extraction ─────────────────────────────
+    stripped = message.strip()
+
+    # Name
+    name = None
+    name_match = re.search(r"(?:my name is|i am|i'm|call me|it's|its)\s+([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+)?)", stripped, re.IGNORECASE)
     if name_match:
         name = name_match.group(1).strip()
+    else:
+        # Standalone name MUST be capitalized (no IGNORECASE)
+        name_match = re.search(r"^([A-Z][a-z]{1,14}(?:\s+[A-Z][a-z]{1,14})?)$", stripped)
+        if name_match:
+            name = name_match.group(1).strip()
+
+    if name and name.lower() not in _SKIP_NAMES and len(name) >= 2:
         session.update_user_fact("User's name", name)
         print(f"[MEMORY] Stored user name: {name}")
+
+    # Hobby / interest
+    hobby_match = re.search(
+        r"(?:my hobby is|my hobbies are|i enjoy|i love|i like|i'm into|i am into)\s+([A-Za-z][\w\s,]+?)(?:\.|,|and|\n|$)",
+        stripped, re.IGNORECASE,
+    )
+    if hobby_match:
+        hobby = hobby_match.group(1).strip()
+        if len(hobby) > 2:
+            session.update_user_fact("User's hobbies/interests", hobby)
+            print(f"[MEMORY] Stored hobby: {hobby}")
+
+    # Location
+    location_match = re.search(
+        r"(?:i (?:live|am) in|i'm from|i'm based in)\s+([A-Za-z][\w\s,]+?)(?:\.|,|\n|$)",
+        stripped, re.IGNORECASE,
+    )
+    if location_match:
+        location = location_match.group(1).strip()
+        if len(location) > 2:
+            session.update_user_fact("User's location", location)
+            print(f"[MEMORY] Stored location: {location}")
 
 
 def clean_response(response_text: str) -> str:

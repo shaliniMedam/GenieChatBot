@@ -30,13 +30,13 @@ MODELS_DIR = BASE_DIR / "models"
 MODEL_PATH = MODELS_DIR / MODEL_FILE
 
 DEFAULT_SETTINGS = {
-    "n_ctx": 32768,       # ← 32K context (your RAM can handle it)
+    "n_ctx": 8192,        # ← Lowered to 8K to speed up CPU inference times
     "temperature": 1.0,
     "top_p": 0.95,
     "top_k": 64,
     "repeat_penalty": 1.0,
-    "max_tokens": 8192,   # ← 8K output for complete responses
-    "stop": ["<turn|>", "user:", "User:", "<end_of_turn>", "<eos>"],
+    "max_tokens": 2048,   # ← Lowered to 2K output
+    "stop": ["<turn|>", "user:", "User:", "<end_of_turn>", "<eos>", "\nuser\n", "user\n", "<start_of_turn>"],
 }
 
 # ---------------------------------------------------------------------------
@@ -92,19 +92,22 @@ class ModelManager:
 
             try:
                 import os
-                # Use physical cores only — hyperthreading hurts LLM inference
-                cpu_cores = min(os.cpu_count() or 4, 8)
+                # Use physical cores only (hyperthreading severely hurts llama.cpp performance)
+                logical_cores = os.cpu_count() or 4
+                cpu_cores = max(1, logical_cores // 2)
+                
                 self._llm = Llama(
                     model_path=str(MODEL_PATH),
-                    n_ctx=32768,
+                    n_ctx=8192,
                     n_threads=cpu_cores,
                     n_threads_batch=cpu_cores,
-                    n_batch=2048,
-                    n_ubatch=1024,
+                    n_batch=512,
+                    n_ubatch=512,
                     verbose=False,
                     n_gpu_layers=0,
                     use_mmap=True,
                     use_mlock=False,
+                    flash_attn=True,
                     chat_format="gemma",
                 )
                 self.model_loaded = True
@@ -147,6 +150,9 @@ class ModelManager:
 
         # If model is currently locked (e.g. background summarization), yield a message
         if self._lock.locked():
+            # Pad with 4KB of SSE comments to bypass uvicorn/starlette buffering so it shows immediately
+            padding = " " * 4096
+            yield f": {padding}\n\n"
             yield self._sse("token", "\n*(Genie is organizing memories, this may take a moment...)*\n\n")
 
         try:

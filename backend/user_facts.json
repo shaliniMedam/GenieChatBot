@@ -1,3 +1,17 @@
 {
-  "global": {}
+  "global": {
+    "User's name": "shalini"
+  },
+  "chat_context": [
+    "i am intrested in ai",
+    "explain deep learning in detail",
+    "what topics did we discuss in previous chat",
+    "what is my name and how old anm i",
+    "what is my age",
+    "write a python code on solving a bodmass question",
+    "what are all the topics we discussed in previous chat",
+    "phantom cipher",
+    "what do you mean by cryptography",
+    "gemma4 2b model"
+  ]
 }

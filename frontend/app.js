@@ -29,7 +29,7 @@ class ChatApp {
         this.loadSettingsFromStorage();
         try {
             this.currentSessionId = localStorage.getItem('genie_session_id') || null;
-        } catch (e) {}
+        } catch (e) { }
         this.loadSessions();
         this.pollModelStatus();
     }
@@ -98,7 +98,7 @@ class ChatApp {
                 }
                 this.settings = { ...this.settings, ...parsed };
             }
-        } catch (e) {}
+        } catch (e) { }
         this.applySettingsToUI();
     }
 
@@ -120,7 +120,7 @@ class ChatApp {
         };
         try {
             localStorage.setItem('genie_settings', JSON.stringify(this.settings));
-        } catch (e) {}
+        } catch (e) { }
 
         fetch(`${API_BASE}/api/settings`, {
             method: 'POST',
@@ -148,10 +148,10 @@ class ChatApp {
         // Get extension reliably from filename
         const ext = file.name.split('.').pop().toLowerCase();
         console.log('File selected:', file.name, 'Extension:', ext, 'MIME:', file.type);
-        
+
         // Allowed extensions (more reliable than MIME types)
         const allowedExts = ['txt', 'pdf', 'doc', 'docx', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'];
-        
+
         if (!allowedExts.includes(ext)) {
             this.showBanner(`Unsupported file type: .${ext}. Supported: ${allowedExts.join(', ')}`, 'error');
             return;
@@ -161,9 +161,9 @@ class ChatApp {
         const previewContainer = document.getElementById('filePreviewContainer');
         const previewImg = document.getElementById('filePreviewImg');
         const previewName = document.getElementById('filePreviewName');
-        
+
         previewContainer.style.display = 'flex';
-        
+
         if (file.type.startsWith('image/')) {
             const reader = new FileReader();
             reader.onload = (e) => {
@@ -177,7 +177,7 @@ class ChatApp {
             previewName.textContent = file.name;
             previewName.style.display = 'block';
         }
-        
+
         this.updateSendButton();
         document.getElementById('messageInput').focus();
     }
@@ -212,7 +212,7 @@ class ChatApp {
 
         const input = document.getElementById('messageInput');
         const message = input.value.trim();
-        
+
         if (!message && !this.pendingFile) return;
         if (!this.modelReady) {
             this.showBanner('Model is still loading, please wait...', 'warning');
@@ -257,7 +257,7 @@ class ChatApp {
             if (this.currentSessionId) {
                 try {
                     localStorage.setItem('genie_session_id', this.currentSessionId);
-                } catch (e) {}
+                } catch (e) { }
             }
             this.loadSessions();
         } catch (err) {
@@ -286,28 +286,28 @@ class ChatApp {
         let displayMessage = '';
         if (isImage) {
             const imageUrl = URL.createObjectURL(file);
-            displayMessage = messageText 
-                ? `![${file.name}](${imageUrl})\n\n${messageText}` 
+            displayMessage = messageText
+                ? `![${file.name}](${imageUrl})\n\n${messageText}`
                 : `![${file.name}](${imageUrl})`;
         } else {
-            displayMessage = messageText 
-                ? `📄 **${file.name}**\n\n${messageText}` 
+            displayMessage = messageText
+                ? `📄 **${file.name}**\n\n${messageText}`
                 : `📄 **${file.name}**`;
         }
-        
+
         this.addMessage('user', displayMessage);
-        
+
         const input = document.getElementById('messageInput');
         input.value = '';
         input.style.height = 'auto';
         this.removeFile();
-        
+
         this.isGenerating = true;
         this.setSendButtonStop();
 
         // Show "Analyzing..." immediately
         const analyzingId = this.showTypingIndicator();
-        
+
         // Update status text
         const statusElement = document.getElementById('inputStatus');
         if (statusElement) {
@@ -330,16 +330,16 @@ class ChatApp {
                 try {
                     const errData = await res.json();
                     if (errData.detail) errorMsg = typeof errData.detail === 'string' ? errData.detail : JSON.stringify(errData.detail);
-                } catch (e) {}
+                } catch (e) { }
                 throw new Error(errorMsg);
             }
 
             const data = await res.json();
             if (data.session_id) {
                 this.currentSessionId = data.session_id;
-                try { localStorage.setItem('genie_session_id', this.currentSessionId); } catch (e) {}
+                try { localStorage.setItem('genie_session_id', this.currentSessionId); } catch (e) { }
             }
-            
+
             const message = data.response || 'File uploaded.';
             this.addMessage('assistant', message);
             this.loadSessions();
@@ -420,7 +420,7 @@ class ChatApp {
             } else if (event === 'session') {
                 if (!this.currentSessionId) {
                     this.currentSessionId = data;
-                    try { localStorage.setItem('genie_session_id', data); } catch (e) {}
+                    try { localStorage.setItem('genie_session_id', data); } catch (e) { }
                 }
 
             } else if (event === 'suggest_new_chat') {
@@ -451,8 +451,8 @@ class ChatApp {
         try {
             renderMathInElement(element, {
                 delimiters: [
-                    {left: '$$', right: '$$', display: true},
-                    {left: '$', right: '$', display: false}
+                    { left: '$$', right: '$$', display: true },
+                    { left: '$', right: '$', display: false }
                 ],
                 throwOnError: false,
                 errorColor: '#cc0000',
@@ -493,7 +493,7 @@ class ChatApp {
         const area = document.getElementById('messagesArea');
         const div = this.createMessageElement(role, isError);
         const bubble = div.querySelector('.bubble');
-        
+
         if (isError) {
             bubble.textContent = content;
         } else {
@@ -501,7 +501,7 @@ class ChatApp {
             // Render math after adding to DOM
             this.renderMath(bubble);
         }
-        
+
         area.appendChild(div);
         area.scrollTop = area.scrollHeight;
         return div;
@@ -560,7 +560,7 @@ class ChatApp {
             const data = await res.json();
             this.sessions = data.sessions || [];
             this.renderSessionsList();
-        } catch {}
+        } catch { }
     }
 
     renderSessionsList() {
@@ -587,19 +587,19 @@ class ChatApp {
             area.innerHTML = '';
             data.messages.forEach(msg => {
                 if (msg.role !== 'system') {
-                    const displayContent = (msg.metadata && msg.metadata.display_content) 
-                        ? msg.metadata.display_content 
+                    const displayContent = (msg.metadata && msg.metadata.display_content)
+                        ? msg.metadata.display_content
                         : msg.content;
                     this.addMessage(msg.role, displayContent);
                 }
             });
             this.renderSessionsList();
-        } catch {}
+        } catch { }
     }
 
     newChat() {
         this.currentSessionId = null;
-        try { localStorage.removeItem('genie_session_id'); } catch (e) {}
+        try { localStorage.removeItem('genie_session_id'); } catch (e) { }
         const area = document.getElementById('messagesArea');
         area.innerHTML = `
             <div class="welcome-screen" id="welcomeScreen">

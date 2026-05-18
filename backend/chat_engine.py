@@ -1,6 +1,7 @@
 """
 Chat Engine - Manages conversation history, memory, and prompt formatting.
 With FULL Summarization-Based Compression (all past messages summarized).
+FIXED: Sessions now persisted to disk. Facts extracted eagerly (not just on compression).
 """
 
 import time
@@ -20,8 +21,12 @@ MAX_FILE_CHARS = 6000 * CHARS_PER_TOKEN
 MAX_HISTORY_MESSAGES = 10       # Hard cap: system + summary + 8 recent messages max
 FACTS_FILE = Path(__file__).parent / "user_facts.json"
 
+# ── NEW: session storage directory ───────────────────────────────
+SESSIONS_DIR = Path(__file__).parent / "sessions"
+SESSIONS_DIR.mkdir(exist_ok=True)
+
 # Summarization constants — compressed for better 2B model reasoning
-SUMMARY_TRIGGER_COUNT = 12      # Compress early to keep context small
+SUMMARY_TRIGGER_COUNT = 24      # Compress less frequently to avoid locking the CPU model
 RECENT_MESSAGES_KEEP = 4        # Keep last 2 Q&A pairs (better coherence)
 SUMMARY_MAX_TOKENS = 400        # Short summaries — 2B model can't handle long ones
 SUMMARY_TEMPERATURE = 0.2       # Very low temp for factual consistency
@@ -166,7 +171,7 @@ class ChatSession:
                 all_facts = json.loads(FACTS_FILE.read_text())
                 chat_context = all_facts.get("chat_context", [])
                 if chat_context:
-                    return "PREVIOUS DISCUSSION TOPICS:\n" + "\n".join(f"- {t}" for t in chat_context)
+                    return "PAST CONVERSATION HISTORY (The user previously asked about these things):\n" + "\n".join(f'- "{t}"' for t in chat_context)
             except Exception:
                 pass
         return ""
@@ -431,7 +436,7 @@ class ChatSession:
             # Merge system prompt into the first user message.
             for i, m in enumerate(conversation):
                 if m["role"] == "user":
-                    m["content"] = "\n\n".join(system_content) + "\n\n" + m["content"]
+                    m["content"] = "[SYSTEM INSTRUCTIONS]\n" + "\n\n".join(system_content) + "\n\n[USER MESSAGE]\n" + m["content"]
                     break
             else:
                 conversation.insert(0, {"role": "user", "content": "\n\n".join(system_content)})
@@ -476,14 +481,108 @@ class ChatSession:
             if keep_system:
                 self.add_message("system", self.system_prompt)
 
+    # ── Disk persistence helpers ────────────────────────────────
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the full session to a JSON-safe dict."""
+        return {
+            "session_id": self.session_id,
+            "created_at": self.created_at,
+            "user_facts": self.user_facts,
+            "base_system_prompt_prefix": self.base_system_prompt.split(self.identity_rules)[0].rstrip("\n "),
+            "messages": [m.to_dict() for m in self.messages],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ChatSession":
+        """Reconstruct a ChatSession from its serialized dict (disk load)."""
+        prefix = data.get("base_system_prompt_prefix", "")
+        session = cls.__new__(cls)
+        session.session_id = data["session_id"]
+        session.created_at = data.get("created_at", time.time())
+        session.identity_rules = (
+            "The assistant's name is Genie.\n\n"
+            "CRITICAL IDENTITY RULES - FOLLOW THESE EXACTLY:\n"
+            "- The assistant is called Genie.\n"
+            "- The assistant is NOT Gemma, Google, or Gemini.\n"
+            "- The assistant is NOT a language model or large language model.\n"
+            "- The assistant does not need a personal name because its name is Genie.\n"
+            "- The assistant was created by this application, not by Google or Meta.\n\n"
+            "EXAMPLE RESPONSES THE ASSISTANT MUST USE:\n"
+            "User: What is your name?\n"
+            "Assistant: My name is Genie.\n\n"
+            "User: Who are you?\n"
+            "Assistant: I am Genie, a local AI assistant.\n\n"
+            "User: Are you Gemma?\n"
+            "Assistant: No, I am Genie. I am not Gemma or any Google model.\n\n"
+            "User: Are you a language model?\n"
+            "Assistant: I am Genie, an AI assistant. I'm not a language model.\n\n"
+            "NEVER say: 'I am a language model', 'I don't have a name', 'I am Gemma', 'I am a Google model', 'trained by Google'.\n\n"
+            "The assistant is helpful, honest, and direct. Always identify as Genie."
+        )
+        session.base_system_prompt = (prefix + "\n\n" + session.identity_rules) if prefix else session.identity_rules
+        session.system_prompt = session.base_system_prompt
+        session.user_facts = data.get("user_facts", {})
+        session._compression_lock = threading.Lock()
+        session._is_compressing = False
+
+        # Restore messages
+        session.messages = []
+        for m in data.get("messages", []):
+            session.messages.append(Message(
+                role=m["role"],
+                content=m["content"],
+                timestamp=m.get("timestamp", time.time()),
+                metadata=m.get("metadata") or {},
+            ))
+
+        # Sync with global facts and refresh prompt
+        session.load_facts()
+        return session
+
 
 class ChatEngine:
-    """Manages all chat sessions."""
+    """Manages all chat sessions with disk persistence."""
     
     def __init__(self, storage_path: Optional[Path] = None):
         self.sessions: Dict[str, ChatSession] = {}
-        self.storage_path = storage_path
-    
+        self.storage_path = storage_path or SESSIONS_DIR
+        self.storage_path.mkdir(exist_ok=True)
+        self._load_all_sessions()   # ← Restore sessions from disk on startup
+
+    # ── Disk helpers ────────────────────────────────────────────
+
+    def _session_file(self, session_id: str) -> Path:
+        # Sanitize session_id so it's always a safe filename
+        safe = re.sub(r"[^\w\-]", "_", session_id)
+        return self.storage_path / f"{safe}.json"
+
+    def save_session(self, session: ChatSession):
+        """Write a session to disk. Called after every assistant reply."""
+        try:
+            data = session.to_dict()
+            self._session_file(session.session_id).write_text(
+                json.dumps(data, indent=2, ensure_ascii=False)
+            )
+        except Exception as e:
+            print(f"[SESSION SAVE ERROR] {session.session_id}: {e}")
+
+    def _load_all_sessions(self):
+        """Load all saved session files from disk at startup."""
+        loaded = 0
+        for f in self.storage_path.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                session = ChatSession.from_dict(data)
+                self.sessions[session.session_id] = session
+                loaded += 1
+            except Exception as e:
+                print(f"[SESSION LOAD ERROR] {f.name}: {e}")
+        if loaded:
+            print(f"[SESSION] Restored {loaded} session(s) from disk.")
+
+    # ── Public API ───────────────────────────────────────────────
+
     def create_session(self, session_id: Optional[str] = None, system_prompt: str = None) -> ChatSession:
         if session_id is None:
             session_id = f"session_{int(time.time() * 1000)}"
@@ -497,11 +596,21 @@ class ChatEngine:
     def delete_session(self, session_id: str) -> bool:
         if session_id in self.sessions:
             del self.sessions[session_id]
+            # Also remove from disk
+            f = self._session_file(session_id)
+            try:
+                if f.exists():
+                    f.unlink()
+            except Exception as e:
+                print(f"[SESSION DELETE ERROR] {e}")
             return True
         return False
     
     def list_sessions(self) -> List[Dict[str, Any]]:
-        return [s.get_summary() for s in self.sessions.values()]
+        summaries = [s.get_summary() for s in self.sessions.values()]
+        # Sort newest-first by last_active
+        summaries.sort(key=lambda x: x.get("last_active", 0), reverse=True)
+        return summaries
     
     def cleanup_old_sessions(self, max_age_hours: float = 24):
         cutoff = time.time() - (max_age_hours * 3600)
@@ -510,7 +619,7 @@ class ChatEngine:
             if s.get_summary()["last_active"] < cutoff
         ]
         for sid in to_remove:
-            del self.sessions[sid]
+            self.delete_session(sid)
         return len(to_remove)
 
 
