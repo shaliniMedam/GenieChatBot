@@ -56,7 +56,7 @@ except ImportError:
     olefile = None
 
 from backend.model_manager import model_manager
-from backend.chat_engine import chat_engine, ChatSession
+from backend.chat_engine import chat_engine, ChatSession, FACTS_FILE
 
 
 def sanitize_for_console(text: str) -> str:
@@ -480,76 +480,45 @@ def _trigger_compression_async(session: ChatSession):
 
 
 def _extract_chat_context_async(session: ChatSession, model_manager):
-    """Extract key discussion topics and store them for future reference."""
+    """Store user's messages as discussion topics for future reference."""
     try:
-        if len(session.messages) < 4:
-            return  # Need enough messages to extract from
-
-        # Build a simple prompt to extract topics
-        recent_msgs = [m for m in session.messages if m.role in ["user", "assistant"]][-6:]
-
-        transcript = []
-        for msg in recent_msgs:
-            prefix = "User" if msg.role == "user" else "Genie"
-            content = msg.content[:250] if len(msg.content) > 250 else msg.content
-            # Clean up content for readability
-            content = content.replace("\n", " ")[:250]
-            transcript.append(f"{prefix}: {content}")
-
-        if not transcript:
+        # Get user messages
+        user_msgs = [m.content for m in session.messages if m.role == "user"]
+        if not user_msgs:
             return
 
-        summary_prompt = [
-            {
-                "role": "user",
-                "content": f"""Extract 1-2 key discussion topics from this conversation (just the topics, not pleasantries).
-Be very brief. Example: "User asked about Paris attractions and transportation"
-
-Conversation:
-{chr(10).join(transcript)}
-
-Topics (1-2 sentences max):"""
-            }
-        ]
-
-        result = model_manager.generate_sync(
-            messages=summary_prompt,
-            temperature=0.2,
-            max_tokens=100,
-        )
-
-        if "response" in result and "error" not in result:
-            topics_text = result["response"].strip()
-            if topics_text and len(topics_text) > 10:
-                # Store in user_facts.json
-                import json
-                from pathlib import Path
-
-                facts_file = Path(__file__).parent / "user_facts.json"
+        # Read current facts
+        all_facts = {}
+        if FACTS_FILE.exists():
+            try:
+                all_facts = json.loads(FACTS_FILE.read_text())
+            except:
                 all_facts = {}
-                if facts_file.exists():
-                    try:
-                        all_facts = json.loads(facts_file.read_text())
-                    except:
-                        pass
 
-                chat_context = all_facts.get("chat_context", [])
+        chat_context = all_facts.get("chat_context", [])
 
-                # Parse topics (might be comma or newline separated)
-                topics = [t.strip().lstrip("- ").strip() for t in topics_text.split("\n") if t.strip()]
+        # Take the first user message as the discussion topic (what they initially asked about)
+        first_msg = user_msgs[0].strip()
 
-                for topic in topics:
-                    if topic and 15 < len(topic) < 300 and topic not in chat_context:
-                        chat_context.append(topic)
+        # Shorten to max 120 chars for storage
+        if len(first_msg) > 120:
+            first_msg = first_msg[:117] + "..."
 
-                # Keep only last 8 topics to avoid bloating context
-                chat_context = chat_context[-8:]
-                all_facts["chat_context"] = chat_context
+        # Only add if it's not a greeting and doesn't already exist
+        if (len(first_msg) > 8 and
+            first_msg.lower() not in [c.lower() for c in chat_context] and
+            not any(x in first_msg.lower() for x in ["hello", "hi ", "hey ", "what can you do"])):
 
-                facts_file.write_text(json.dumps(all_facts, indent=2))
-                print(f"[CONTEXT] Stored {len(topics)} topics for future reference")
+            chat_context.append(first_msg)
+
+            # Keep only last 10 topics to avoid bloating context
+            chat_context = chat_context[-10:]
+            all_facts["chat_context"] = chat_context
+            FACTS_FILE.write_text(json.dumps(all_facts, indent=2))
+            print(f"[CONTEXT] Stored topic: {first_msg[:50]}...")
+
     except Exception as e:
-        print(f"[CONTEXT ERROR] {e}")
+        print(f"[CONTEXT ERROR] {str(e)}")
 
 
 def _get_or_create_session(session_id, system_prompt) -> ChatSession:
